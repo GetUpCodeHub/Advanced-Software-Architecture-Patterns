@@ -1,0 +1,307 @@
+# ADR-002: Adopt Event-Driven Communication
+
+## Status
+**Proposed**
+
+## Date
+2026-10-15
+
+## Decision Makers
+Software Architecture Team
+
+## Related Documents
+- Software Requirements Specification (SRS): E-commerce System
+- ADR-001: Use Microservices Architecture
+
+## 1. Context
+
+The E-commerce System is designed using a microservices architecture, as described in ADR-001. The system contains several independent services, including:
+
+- User and Authentication Service
+- Product Catalog Service
+- Shopping Cart Service
+- Order Management Service
+- Payment Service
+- Inventory Service
+- Promotion Service
+- Shipping Service
+- Notification Service
+- Audit and Reporting Service
+
+These services need to communicate to complete business workflows. For example, when a customer places an order, the system may need to validate the order, process payment, reserve inventory, arrange shipping, notify the customer, and record relevant events.
+
+If all services rely heavily on synchronous HTTP requests, they can become tightly coupled. A temporary failure or slow response from one service may affect the availability and response time of other services.
+
+The system therefore needs a communication approach that supports asynchronous processing, loose coupling, scalability, and resilience while maintaining reliable business workflows.
+
+## 2. Decision
+
+We will adopt **event-driven communication** for asynchronous interactions between E-commerce System microservices.
+
+Services will publish domain events when significant business state changes occur. Other services can subscribe to relevant events and perform their own processing independently.
+
+Examples of domain events include:
+
+- `OrderCreated`
+- `PaymentAuthorized`
+- `PaymentFailed`
+- `InventoryReserved`
+- `InventoryReservationFailed`
+- `OrderConfirmed`
+- `OrderCancelled`
+- `ShipmentCreated`
+- `ShipmentDispatched`
+- `RefundCompleted`
+
+A message broker will be used to transport events between services. The specific broker technology will be selected during implementation planning.
+
+Synchronous APIs may still be used when an immediate response is required, such as retrieving product details, checking account information, or returning checkout validation results. Event-driven communication will primarily be used for asynchronous workflows and notifications.
+
+### 2.1 Communication Pattern
+
+The architecture will follow these principles:
+
+1. **Event producers** publish events when relevant business changes occur.
+2. **Event consumers** subscribe to events and process them independently.
+3. **Message broker** routes and delivers events to the appropriate consumers.
+4. **Asynchronous processing** allows non-critical operations to continue without blocking the original request.
+5. **Service independence** ensures that producers do not need direct knowledge of all consumers.
+
+### 2.2 Example Order Workflow
+
+A typical order workflow may follow this sequence:
+
+1. The customer submits an order.
+2. The Order Management Service creates a pending order and publishes `OrderCreated`.
+3. The Inventory Service consumes the event and attempts to reserve the required stock.
+4. The Payment Service processes payment according to the order workflow and publishes a payment result event.
+5. The Order Management Service consumes the inventory and payment results.
+6. If the required conditions are satisfied, the order is confirmed and `OrderConfirmed` is published.
+7. The Shipping Service consumes `OrderConfirmed` and initiates shipment preparation.
+8. The Notification Service consumes relevant order and shipment events to notify the customer.
+9. The Audit and Reporting Service consumes relevant events for audit records and business analytics.
+
+The exact event sequence, payment timing, and compensation rules must be defined in the detailed business workflow design.
+
+## 3. Alternatives Considered
+
+### 3.1 Synchronous REST Communication Only
+
+**Description:** All service-to-service communication is performed through synchronous HTTP APIs.
+
+**Advantages:**
+- Simple request-response interaction.
+- Immediate success or failure feedback.
+- Straightforward debugging for basic workflows.
+- Widely supported by development tools.
+
+**Disadvantages:**
+- Services become more dependent on the availability of other services.
+- Long-running workflows may increase request latency.
+- Temporary downstream failures can propagate to upstream services.
+- Adding new consumers may require changes to existing service integrations.
+
+**Conclusion:** Not selected as the only communication mechanism because it does not adequately support the system's asynchronous processing needs.
+
+### 3.2 Event-Driven Communication
+
+**Description:** Services publish and consume events through a message broker.
+
+**Advantages:**
+- Reduces direct coupling between services.
+- Supports asynchronous processing.
+- Allows multiple consumers to react to the same event.
+- Helps isolate temporary service failures.
+- Supports independent scaling of event consumers.
+
+**Disadvantages:**
+- Introduces eventual consistency.
+- Requires message delivery, retry, and duplicate-processing strategies.
+- Makes distributed workflows more difficult to trace and debug.
+- Requires additional broker infrastructure and operational monitoring.
+
+**Conclusion:** Selected as the primary pattern for asynchronous inter-service workflows.
+
+### 3.3 Direct Database Sharing
+
+**Description:** Multiple services access shared database tables to exchange business information.
+
+**Advantages:**
+- May appear simple for small prototypes.
+- Avoids the initial need for messaging infrastructure.
+
+**Disadvantages:**
+- Creates tight coupling between service data models.
+- Makes independent service deployment and schema evolution more difficult.
+- Weakens service ownership of business data.
+- Increases the risk of unintended cross-service data changes.
+
+**Conclusion:** Rejected. Each microservice should own its business data and expose information through defined APIs or events.
+
+## 4. Consequences
+
+### 4.1 Positive Consequences
+
+- **Loose coupling:** Producers do not need to call every downstream consumer directly.
+- **Scalability:** Consumers can be scaled according to message volume and processing requirements.
+- **Resilience:** Temporary consumer failures can be handled through durable message storage and retry policies where supported by the selected broker.
+- **Extensibility:** New consumers, such as analytics or recommendation services, can subscribe to existing events without requiring changes to the producer.
+- **Responsiveness:** Non-critical tasks, including notifications and reporting, can be processed asynchronously.
+- **Improved integration:** Business events provide a defined mechanism for coordinating distributed services.
+
+### 4.2 Negative Consequences
+
+- **Eventual consistency:** Some services may temporarily hold different views of the same business process.
+- **Operational complexity:** The message broker requires monitoring, capacity planning, access control, and maintenance.
+- **Duplicate delivery:** Consumers must tolerate receiving the same event more than once.
+- **Ordering challenges:** Events may arrive out of order, especially when processing is distributed across multiple consumers.
+- **Debugging complexity:** Diagnosing a business workflow may require tracing events across several services.
+- **Schema management:** Event formats must evolve without unnecessarily breaking existing consumers.
+
+## 5. Implementation Considerations
+
+### 5.1 Event Schema Design
+
+Each event should have a consistent envelope containing fields such as:
+
+| Field | Description |
+|---|---|
+| `eventId` | Unique identifier for the event |
+| `eventType` | Name of the event, such as `OrderCreated` |
+| `eventVersion` | Version of the event schema |
+| `occurredAt` | Timestamp when the event occurred |
+| `producer` | Service that produced the event |
+| `correlationId` | Identifier linking related operations |
+| `aggregateId` | Identifier of the related business entity |
+| `payload` | Event-specific business data |
+
+Events should contain only the information required by consumers. Sensitive information, including payment credentials, must not be included in event payloads unless explicitly justified and protected by approved security controls.
+
+### 5.2 Reliable Event Publishing
+
+To reduce the risk of business data being saved without the corresponding event being published, services that require reliable database-and-event consistency should consider the **Transactional Outbox Pattern**.
+
+With this approach, a service writes its business changes and an outgoing event record in the same local database transaction. A separate publisher delivers the recorded event to the message broker.
+
+The publishing process must track delivery progress and support safe retries.
+
+### 5.3 Idempotent Consumers
+
+Consumers must be designed to handle duplicate event delivery safely.
+
+Recommended practices include:
+
+- Recording processed event IDs where necessary.
+- Applying business changes only once for a given logical operation.
+- Using database constraints or idempotency keys for sensitive operations.
+- Ensuring that retries do not cause duplicate orders, stock reservations, refunds, or notifications where duplicates would be harmful.
+
+### 5.4 Retry and Dead-Letter Handling
+
+The event processing infrastructure should define:
+
+- Retry policies for transient failures.
+- Maximum retry attempts or retry duration.
+- Dead-letter handling for messages that cannot be processed.
+- Monitoring and alerting for repeated failures.
+- Procedures for investigating and replaying failed messages safely.
+
+Replaying messages must not bypass business validation or cause duplicate side effects.
+
+### 5.5 Event Ordering
+
+Where ordering matters, such as inventory updates or order status transitions, the design should define an ordering key and a strategy for rejecting, delaying, or reconciling stale events.
+
+Consumers must not assume that all events across the entire system will be delivered in a single global order.
+
+### 5.6 Distributed Transactions and Compensation
+
+A business workflow may involve multiple services and cannot generally rely on one database transaction spanning all services.
+
+For multi-step processes such as order placement, payment, and inventory reservation, the system should consider a **Saga Pattern**.
+
+A saga coordinates local transactions and defines compensating actions when a workflow cannot complete. For example, an order cancellation may require releasing reserved inventory or initiating a payment void or refund, depending on the payment state.
+
+The detailed saga steps, timeout policies, and compensation rules must be defined before implementation.
+
+### 5.7 Observability
+
+The system should support:
+
+- Structured logs for event production and consumption.
+- Correlation IDs across related service operations.
+- Metrics for message throughput, processing latency, retries, and failures.
+- Alerts for broker availability and consumer backlog.
+- Distributed tracing where supported by the selected technology stack.
+
+### 5.8 Security
+
+Event-driven communication must follow the system's security requirements:
+
+- Authenticate services connecting to the broker.
+- Apply least-privilege access to topics, queues, or equivalent messaging resources.
+- Encrypt network traffic.
+- Avoid publishing passwords, access tokens, or unnecessary payment information.
+- Apply appropriate retention and access policies to sensitive event data.
+- Record relevant administrative and security activities.
+
+### 5.9 Technology Selection
+
+The message broker will be selected based on:
+
+- Delivery and persistence requirements.
+- Expected message volume and throughput.
+- Ordering and replay requirements.
+- Operational complexity.
+- Monitoring and security capabilities.
+- Integration with the selected programming language and infrastructure.
+- Deployment, availability, and cost constraints.
+
+No specific broker product is mandated by this ADR.
+
+## 6. Requirements Traceability
+
+| SRS Area | Relationship to This Decision |
+|---|---|
+| System Architecture | Supports communication between independently deployed microservices. |
+| Order Management | Coordinates order state changes and downstream processing. |
+| Payment Processing | Publishes payment outcomes for relevant services. |
+| Inventory Management | Coordinates stock reservation and release workflows. |
+| Shipping and Fulfillment | Reacts to confirmed orders and shipping state changes. |
+| Notifications | Sends customer notifications based on relevant events. |
+| Audit and Reporting | Consumes selected events for audit and analytical processing. |
+| Non-Functional Requirements | Supports scalability, resilience, maintainability, and observability. |
+
+## 7. Risks and Mitigation
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Events are lost before publication | Business workflow becomes inconsistent | Use durable messaging and consider the Transactional Outbox Pattern. |
+| Duplicate events are processed | Duplicate business actions | Implement idempotent consumers and deduplication where needed. |
+| Consumers process events out of order | Incorrect business state | Define ordering rules and validate state transitions. |
+| A consumer repeatedly fails | Processing delays and growing backlog | Configure retries, dead-letter handling, monitoring, and alerts. |
+| Event schema changes break consumers | Integration failures | Version schemas and maintain backward compatibility where practical. |
+| Broker outage interrupts processing | Delayed business workflows | Define availability, persistence, recovery, and operational procedures. |
+| Distributed workflow becomes difficult to diagnose | Longer incident resolution | Use correlation IDs, structured logs, metrics, and tracing. |
+| Sensitive data is exposed in messages | Security and privacy impact | Minimize payloads and enforce access controls and encryption. |
+
+## 8. Decision Outcome
+
+**Proposed:** Adopt event-driven communication for asynchronous communication between E-commerce System microservices.
+
+Synchronous APIs will remain available for interactions that require immediate responses. The message broker, event schema standards, delivery guarantees, and workflow orchestration approach will be finalized during detailed architecture and implementation planning.
+
+This decision is intended to improve service decoupling, resilience, and scalability without requiring every interaction to become asynchronous.
+
+## 9. Follow-Up Actions
+
+- [ ] Select and document the message broker technology.
+- [ ] Define naming conventions and event schema standards.
+- [ ] Identify which service owns and publishes each domain event.
+- [ ] Define event versioning and compatibility rules.
+- [ ] Specify delivery, retry, deduplication, and dead-letter policies.
+- [ ] Evaluate the Transactional Outbox Pattern for critical business events.
+- [ ] Define saga workflows and compensation rules for order processing.
+- [ ] Establish monitoring, tracing, and alerting requirements.
+- [ ] Define broker access control and event data retention policies.
+- [ ] Create integration tests for duplicate, delayed, and failed event processing.

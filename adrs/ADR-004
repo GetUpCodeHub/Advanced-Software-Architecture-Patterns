@@ -1,0 +1,339 @@
+# ADR-004: Integrate External Payment Service
+
+## Status
+**Proposed**
+
+## Date
+2026-10-15
+
+## Decision Makers
+Software Architecture Team
+
+## Related Documents
+- Software Requirements Specification (SRS): E-commerce System
+- ADR-001: Use Microservices Architecture
+- ADR-002: Adopt Event-Driven Communication
+- ADR-003: Define Business Service Boundaries
+
+## 1. Context
+
+The E-commerce System must support secure online payments for customer orders. Implementing payment processing directly would require the system to handle sensitive payment information, integrate with financial networks, manage transaction failures, and maintain payment security and compliance.
+
+ADR-003 defines the Payment Service as the owner of payment transactions, while the Order Management Service remains responsible for the order lifecycle.
+
+Integrating an external payment service provider allows the system to delegate payment processing to a specialized provider while keeping payment-related business logic within the Payment Service.
+
+The integration must support payment initiation, payment status updates, failure handling, refunds where supported, and reliable communication with the Order Management Service.
+
+The specific payment provider has not yet been selected and will be evaluated during implementation planning.
+
+## 2. Decision
+
+We will integrate the E-commerce System with an external payment service provider through the Payment Service.
+
+The Payment Service will act as the internal integration boundary between the E-commerce System and the external provider. Other internal services must not integrate directly with the payment provider.
+
+The integration will follow these principles:
+
+1. **Provider isolation:** Provider-specific APIs and data formats remain encapsulated within the Payment Service.
+2. **Secure payment processing:** Sensitive payment information must be handled according to applicable security and compliance requirements.
+3. **Explicit payment states:** Payment operations must follow defined state transitions.
+4. **Asynchronous status updates:** Provider callbacks or webhooks will be used where supported.
+5. **Reliable communication:** Timeouts, retries, duplicate callbacks, and reconciliation must be handled explicitly.
+6. **Order and payment separation:** The Payment Service owns payment state; the Order Management Service owns order state.
+7. **Provider flexibility:** The internal payment interface should minimize dependencies on a single provider where practical.
+
+## 3. Architecture Overview
+
+The integration involves the following components:
+
+- **Customer Interface:** Allows customers to initiate checkout and interact with the provider's payment experience.
+- **Order Management Service:** Creates and maintains orders and coordinates order processing.
+- **Payment Service:** Initiates payment operations, stores payment records, and processes provider responses.
+- **External Payment Provider:** Authorizes, captures, or refunds payments according to its supported capabilities.
+- **Message Broker:** Distributes payment domain events to subscribed internal services, as defined in ADR-002.
+
+The Payment Service is the only internal service responsible for communicating with the external payment provider.
+
+### 3.1 Typical Payment Flow
+
+1. The customer submits an order for checkout.
+2. The Order Management Service creates an order in an appropriate pending state.
+3. The Order Management Service requests payment initiation through the Payment Service.
+4. The Payment Service creates a payment record and sends a request to the external provider.
+5. The provider returns an initial response, such as a payment session, redirect URL, or pending status.
+6. The customer completes any required payment interaction with the provider.
+7. The provider sends a callback or webhook when the payment status changes, where supported.
+8. The Payment Service validates the provider notification and updates its payment record.
+9. The Payment Service publishes a domain event, such as `PaymentAuthorized`, `PaymentSucceeded`, or `PaymentFailed`, as appropriate to the provider's payment lifecycle.
+10. The Order Management Service consumes the event and updates the order according to business rules.
+11. The Notification Service may notify the customer of the resulting order or payment status.
+
+The customer's browser redirect or client-side confirmation must not be treated as the sole authoritative proof of successful payment. The Payment Service must verify the payment result using a trusted provider response or server-to-server confirmation mechanism.
+
+## 4. Alternatives Considered
+
+### 4.1 Build an In-House Payment Processing System
+
+**Description:** Implement payment processing and direct financial network integrations within the E-commerce System.
+
+**Advantages:**
+- Greater control over payment processing.
+- Potential flexibility for specialized payment requirements.
+
+**Disadvantages:**
+- High implementation and maintenance costs.
+- Significant security and compliance responsibilities.
+- Complex integration with payment networks and financial institutions.
+- Increased operational and fraud-management responsibilities.
+
+**Conclusion:** Rejected for the initial system because integrating an established provider is expected to reduce implementation complexity.
+
+### 4.2 Integrate the Provider Directly from the Order Management Service
+
+**Description:** The Order Management Service calls the external payment provider directly.
+
+**Advantages:**
+- Fewer internal service interactions.
+- Simpler initial implementation for a small prototype.
+
+**Disadvantages:**
+- Couples order processing to provider-specific APIs.
+- Mixes order lifecycle logic with payment integration logic.
+- Makes provider replacement and independent payment scaling more difficult.
+
+**Conclusion:** Rejected because ADR-003 assigns payment operations and payment data ownership to the Payment Service.
+
+### 4.3 Integrate Through a Dedicated Payment Service
+
+**Description:** A dedicated Payment Service encapsulates the external provider integration.
+
+**Advantages:**
+- Separates payment logic from order management.
+- Centralizes payment security and provider-specific behavior.
+- Supports independent testing and monitoring.
+- Provides a controlled path for changing or adding providers.
+
+**Disadvantages:**
+- Adds an internal service dependency.
+- Requires reliable communication and distributed workflow handling.
+- Introduces additional deployment and monitoring requirements.
+
+**Conclusion:** Selected.
+
+## 5. Payment Service Responsibilities
+
+The Payment Service will be responsible for:
+
+- Creating payment records associated with orders.
+- Initiating provider payment sessions or transactions.
+- Communicating with provider APIs.
+- Processing payment authorization, capture, failure, void, and refund operations where supported.
+- Validating provider callbacks or webhooks.
+- Maintaining payment transaction status and provider references.
+- Preventing duplicate processing of payment requests.
+- Publishing payment-related domain events.
+- Supporting payment reconciliation.
+- Recording relevant payment audit information.
+- Applying access controls to payment operations.
+
+The Payment Service must not own the overall order lifecycle or directly modify the Order Management Service's database.
+
+## 6. Payment State Management
+
+The Payment Service will define explicit states for payment operations.
+
+The following is a proposed initial state model; the exact states must be aligned with the selected provider's capabilities.
+
+| State | Meaning |
+|---|---|
+| `CREATED` | A payment record has been created. |
+| `PENDING` | Payment processing has started but the final outcome is not known. |
+| `AUTHORIZED` | The provider has authorized the payment, where authorization is supported. |
+| `SUCCEEDED` | The payment has completed successfully according to the provider's transaction model. |
+| `FAILED` | The payment attempt has failed. |
+| `CANCELLED` | The payment operation has been cancelled. |
+| `VOIDED` | An authorization or transaction has been voided where supported. |
+| `PARTIALLY_REFUNDED` | Part of the captured payment has been refunded. |
+| `REFUNDED` | The captured payment has been fully refunded. |
+
+The Payment Service must validate every state transition and reject invalid or stale updates.
+
+An authorization is not necessarily equivalent to a completed capture. The system must distinguish these states whenever the provider supports separate authorization and capture operations.
+
+A refund is a separate financial operation and must not simply overwrite the historical result of the original payment.
+
+## 7. Security Requirements
+
+### 7.1 Sensitive Payment Data
+
+- The system should prefer provider-hosted checkout pages, hosted payment fields, or tokenized payment methods where suitable.
+- The E-commerce System must not store raw card verification values.
+- Payment card data should not pass through internal services unless necessary and explicitly approved.
+- Provider tokens and credentials must be stored in an approved secrets-management system.
+- Sensitive payment information must not appear in application logs, event payloads, or error messages.
+
+### 7.2 Authentication and Authorization
+
+- Provider API requests must use the authentication mechanism required by the provider.
+- Only authorized internal components may initiate or modify payment operations.
+- Administrative refund and void operations must be protected by role-based access controls.
+- Privileged payment operations should be audited.
+
+### 7.3 Webhook Validation
+
+Where webhooks are supported, the Payment Service must:
+
+- Validate the provider's signature or other documented authenticity mechanism.
+- Verify that the notification corresponds to a known payment or transaction.
+- Validate the transaction amount, currency, and relevant identifiers.
+- Reject invalid or unauthenticated notifications.
+- Process duplicate notifications safely.
+- Avoid trusting payment status values supplied only by the customer-facing client.
+
+### 7.4 Compliance
+
+The implementation team must determine the applicable payment security, privacy, and financial compliance requirements based on the selected provider, payment methods, deployment region, and business model.
+
+Provider integration does not automatically eliminate the system's compliance obligations.
+
+## 8. Reliability and Failure Handling
+
+### 8.1 API Timeouts
+
+Requests to the provider must have explicit connection and response timeouts.
+
+If a request times out, the Payment Service must not automatically assume that the payment failed. The provider may have processed the request even if the response was not received.
+
+The service should query the provider or initiate reconciliation before attempting a potentially duplicate financial operation.
+
+### 8.2 Idempotency
+
+Payment initiation and other supported financial operations must use idempotency keys where the provider supports them.
+
+The Payment Service must maintain internal operation identifiers and enforce appropriate uniqueness constraints so that repeated requests do not unintentionally create duplicate charges or refunds.
+
+### 8.3 Retry Policy
+
+Retries should be limited to appropriate transient failures and must respect the provider's documented retry guidance.
+
+The service must distinguish between:
+
+- Requests known not to have been processed.
+- Requests with a confirmed result.
+- Requests whose outcome is unknown.
+
+Unknown outcomes must be reconciled before an unsafe retry.
+
+### 8.4 Reconciliation
+
+The Payment Service should periodically reconcile internal payment records with the provider's transaction records where the provider supports this capability.
+
+Reconciliation should identify:
+- Payments that remain pending beyond expected time limits.
+- Mismatched payment statuses.
+- Amount or currency discrepancies.
+- Missing or delayed provider notifications.
+- Refund operations with unresolved outcomes.
+
+Any discrepancies must be logged, monitored, and handled through a defined operational procedure.
+
+### 8.5 Refund Failures
+
+Refund operations must have their own identifiers and status records.
+
+If a refund request times out or returns an ambiguous result, the service should verify its status before submitting another refund operation.
+
+## 9. Integration with Other Microservices
+
+The Payment Service will use documented APIs and domain events to communicate with other services.
+
+| Interaction | Mechanism | Purpose |
+|---|---|---|
+| Order Management → Payment | Internal API | Initiate or request a payment operation |
+| Payment → Order Management | Domain event | Report payment authorization, success, failure, or refund outcomes |
+| Payment → External Provider | Provider API | Create and manage payment transactions |
+| External Provider → Payment | Webhook or callback, where supported | Report provider-side status changes |
+| Payment → Audit and Reporting | Domain events or approved reporting integration | Support audit and reporting |
+| Payment → Notification | Domain events | Trigger payment-related notifications when required |
+
+Example events include:
+
+- `PaymentInitiated`
+- `PaymentAuthorized`
+- `PaymentSucceeded`
+- `PaymentFailed`
+- `PaymentVoided`
+- `RefundInitiated`
+- `RefundCompleted`
+- `RefundFailed`
+
+Event names and meanings must be defined consistently in the system's event catalog. Events should distinguish authorization, capture, and refund outcomes rather than treating all of them as a single generic success state.
+
+## 10. Consequences
+
+### 10.1 Positive Consequences
+
+- Reduces the need to implement payment processing infrastructure internally.
+- Separates payment operations from order management.
+- Centralizes provider integration and payment-related security controls.
+- Supports payment status tracking and reconciliation.
+- Enables controlled provider replacement or expansion where interfaces permit.
+- Improves auditability of payment operations.
+
+### 10.2 Negative Consequences
+
+- The system depends on the availability and behavior of an external provider.
+- Provider fees and commercial terms may affect operating costs.
+- Provider APIs, supported payment methods, and transaction states may differ.
+- Payment processing can involve asynchronous updates and unresolved outcomes.
+- Security and compliance responsibilities remain with the business and implementation team.
+- Switching providers may still require migration, contract changes, and workflow adjustments.
+
+## 11. Risks and Mitigation
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Provider outage | Customers cannot complete payments | Define timeouts, monitoring, recovery procedures, and customer-facing failure handling |
+| Duplicate payment request | Customer may be charged more than once | Use idempotency keys and enforce operation uniqueness |
+| Invalid webhook | Payment state may be manipulated | Validate signatures, transaction identifiers, amount, and currency |
+| Delayed provider notification | Order remains pending | Reconcile payment status and monitor pending transactions |
+| Ambiguous request timeout | Payment outcome is unknown | Query the provider before retrying the financial operation |
+| Provider API changes | Integration failures | Encapsulate provider-specific logic and monitor API lifecycle notices |
+| Sensitive data exposure | Security and compliance impact | Minimize payment data handling, restrict access, and redact logs |
+| Refund inconsistency | Customer and order records disagree | Track refund operations independently and reconcile their outcomes |
+| Provider lock-in | Migration becomes costly | Maintain an internal payment interface and document provider-specific assumptions |
+
+## 12. Requirements Traceability
+
+| SRS Area | Relationship to This Decision |
+|---|---|
+| Checkout | Enables customers to initiate payment during order placement. |
+| Payment Processing | Defines payment initiation, transaction status, and result handling. |
+| Order Management | Ensures order status is updated based on verified payment outcomes. |
+| Security Requirements | Establishes controls for credentials, sensitive data, and provider notifications. |
+| Reliability Requirements | Addresses timeouts, retries, duplicate requests, and reconciliation. |
+| Notifications | Enables payment-related customer notifications. |
+| Audit and Reporting | Supports payment traceability and financial reconciliation. |
+
+## 13. Decision Outcome
+
+**Proposed:** Integrate an external payment provider through the dedicated Payment Service.
+
+The Payment Service will own payment transaction records and provider integration. The Order Management Service will continue to own order state. Payment outcomes will be communicated through documented APIs and domain events, while provider notifications will be validated before they update authoritative payment records.
+
+The specific provider, supported payment methods, and final transaction state model remain open decisions until provider evaluation and detailed implementation planning are completed.
+
+## 14. Follow-Up Actions
+
+- [ ] Evaluate payment providers against supported countries, currencies, payment methods, fees, and availability requirements.
+- [ ] Confirm the applicable security and compliance obligations.
+- [ ] Define the internal payment API contract.
+- [ ] Define payment and refund state transitions.
+- [ ] Specify webhook authentication and replay protection.
+- [ ] Implement idempotency for payment and refund operations.
+- [ ] Define timeout, retry, and reconciliation procedures.
+- [ ] Define payment-related domain event schemas.
+- [ ] Establish monitoring and alerting for payment failures and pending transactions.
+- [ ] Test provider outages, duplicate requests, delayed notifications, and ambiguous outcomes.
+- [ ] Document operational procedures for payment disputes and reconciliation exceptions.

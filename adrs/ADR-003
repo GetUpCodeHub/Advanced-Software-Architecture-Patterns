@@ -1,0 +1,420 @@
+# ADR-003: Define Business Service Boundaries
+
+## Status
+**Proposed**
+
+## Date
+2026-10-15
+
+## Decision Makers
+Software Architecture Team
+
+## Related Documents
+- Software Requirements Specification (SRS): E-commerce System
+- ADR-001: Use Microservices Architecture
+- ADR-002: Adopt Event-Driven Communication
+
+## 1. Context
+
+The E-commerce System is designed as a microservices-based application. As the system grows, clear service boundaries are necessary to maintain independent development, deployment, scaling, and data ownership.
+
+Without clearly defined boundaries, services may duplicate business logic, share databases, or become tightly coupled through direct dependencies. These problems can reduce maintainability and make future changes more difficult.
+
+The system must support the main e-commerce business capabilities, including user accounts, product catalog management, shopping carts, order processing, payments, inventory, promotions, shipping, notifications, and audit reporting.
+
+ADR-001 establishes the microservices architecture, while ADR-002 defines event-driven communication for asynchronous interactions. This ADR identifies the initial business service boundaries and the responsibilities assigned to each service.
+
+## 2. Decision
+
+We will divide the E-commerce System into business-oriented microservices. Each service will own a clearly defined business capability, expose documented interfaces, and manage its own business data.
+
+Services must not directly modify another service's database. Cross-service interactions must use documented APIs or domain events, following the communication principles established in ADR-002.
+
+The following service boundaries are the initial architectural baseline.
+
+## 3. Proposed Business Service Boundaries
+
+### 3.1 User and Authentication Service
+
+**Primary responsibility:** Manage customer accounts and authentication.
+
+Responsibilities:
+- Customer registration and login.
+- Authentication and session management.
+- Password reset and account recovery.
+- Customer account status management.
+- Authentication-related security events.
+
+Data ownership:
+- Customer account records.
+- Authentication credentials and related security metadata.
+- Session or token-related records, where applicable.
+
+Out of scope:
+- Product, order, payment, and shipping management.
+- Business-specific customer order history.
+
+### 3.2 Product Catalog Service
+
+**Primary responsibility:** Manage product information presented to customers.
+
+Responsibilities:
+- Create, update, and maintain product records.
+- Manage product descriptions, categories, and attributes.
+- Provide product details and catalog search interfaces.
+- Manage product publication and visibility status.
+
+Data ownership:
+- Product records.
+- Product categories and attributes.
+- Catalog-related metadata.
+
+Out of scope:
+- Physical stock quantity and stock reservation.
+- Shopping cart contents.
+- Payment processing.
+
+### 3.3 Shopping Cart Service
+
+**Primary responsibility:** Manage customers' shopping carts before order submission.
+
+Responsibilities:
+- Add products to a cart.
+- Update product quantities and remove items.
+- Retrieve cart contents.
+- Calculate preliminary cart totals.
+- Validate cart contents before checkout.
+
+Data ownership:
+- Active shopping cart records.
+- Cart items and quantities.
+- Cart-related metadata.
+
+Out of scope:
+- Final order lifecycle management.
+- Payment authorization or capture.
+- Inventory ownership.
+
+The cart may reference product and pricing information from other services, but it must not become the authoritative owner of product or inventory data.
+
+### 3.4 Order Management Service
+
+**Primary responsibility:** Own the order lifecycle from submission to completion or cancellation.
+
+Responsibilities:
+- Create orders from validated checkout requests.
+- Maintain order status and order history.
+- Coordinate order processing with payment and inventory services.
+- Confirm or cancel orders according to business rules.
+- Handle order-level failures and compensation workflows.
+- Publish order lifecycle events.
+
+Data ownership:
+- Order records and order line snapshots.
+- Order status and status history.
+- Order totals recorded at order placement.
+- Order-related workflow and correlation metadata.
+
+Out of scope:
+- Direct payment gateway integration.
+- Direct modification of inventory records.
+- Shipment execution and delivery tracking.
+
+The Order Management Service is the authoritative owner of order status. Other services may maintain their own references to an order but must not independently change its authoritative state.
+
+### 3.5 Payment Service
+
+**Primary responsibility:** Manage payment operations and payment transaction records.
+
+Responsibilities:
+- Initiate payment operations.
+- Integrate with external payment providers.
+- Process payment authorization, capture, failure, void, and refund operations as supported.
+- Maintain payment transaction status.
+- Handle provider callbacks and payment reconciliation.
+- Publish payment outcome events.
+
+Data ownership:
+- Payment transaction records.
+- Provider transaction references.
+- Payment operation status.
+- Refund and reconciliation records.
+
+Out of scope:
+- Ownership of the order lifecycle.
+- Product catalog and inventory management.
+- Storage of unnecessary sensitive payment credentials.
+
+The Payment Service reports payment outcomes. The Order Management Service uses those outcomes to determine the corresponding order state.
+
+### 3.6 Inventory Service
+
+**Primary responsibility:** Manage stock availability and inventory reservations.
+
+Responsibilities:
+- Maintain stock quantities.
+- Check inventory availability.
+- Reserve stock for orders.
+- Release reservations when permitted.
+- Update stock after relevant fulfillment events.
+- Prevent overselling through concurrency-safe inventory operations.
+- Publish inventory and reservation outcome events.
+
+Data ownership:
+- Inventory records.
+- Available and reserved quantities.
+- Reservation records.
+- Inventory adjustment history.
+
+Out of scope:
+- Product descriptions and catalog categories.
+- Order lifecycle ownership.
+- Payment processing.
+
+The Inventory Service is the authoritative owner of stock quantities and reservation state.
+
+### 3.7 Promotion Service
+
+**Primary responsibility:** Manage discounts and promotional rules.
+
+Responsibilities:
+- Maintain promotion definitions.
+- Validate coupon codes.
+- Evaluate promotion eligibility.
+- Calculate discounts according to configured rules.
+- Enforce usage limits and validity periods.
+- Record promotion usage where required.
+
+Data ownership:
+- Promotion and coupon definitions.
+- Eligibility rules.
+- Promotion usage and redemption records.
+
+Out of scope:
+- Final order lifecycle ownership.
+- Payment processing.
+- Inventory quantity management.
+
+The Order Management Service records the final applied discount and relevant pricing snapshot for each order. The Promotion Service remains the owner of promotion definitions and redemption rules.
+
+### 3.8 Shipping Service
+
+**Primary responsibility:** Manage shipment preparation and delivery tracking.
+
+Responsibilities:
+- Create shipment records for eligible orders.
+- Integrate with shipping providers.
+- Generate shipment labels where supported.
+- Track shipment status and delivery progress.
+- Process shipping provider updates.
+- Publish shipment lifecycle events.
+
+Data ownership:
+- Shipment records.
+- Tracking numbers and provider references.
+- Shipment status and tracking history.
+
+Out of scope:
+- Order lifecycle ownership.
+- Payment transaction management.
+- Inventory stock ownership.
+
+The Shipping Service manages shipment state independently. The Order Management Service remains responsible for the overall order state.
+
+### 3.9 Notification Service
+
+**Primary responsibility:** Deliver customer-facing and operational notifications.
+
+Responsibilities:
+- Send order confirmation notifications.
+- Send payment and shipping status notifications.
+- Deliver account-related notifications.
+- Support configured email, SMS, or other notification channels.
+- Track notification delivery attempts and outcomes.
+- Retry transient delivery failures.
+
+Data ownership:
+- Notification requests and delivery status.
+- Notification templates and channel configuration.
+- Delivery attempt records.
+
+Out of scope:
+- Making authoritative order, payment, or inventory decisions.
+- Owning the business state that triggered a notification.
+
+The Notification Service consumes relevant domain events and sends messages without becoming the authoritative source of the underlying business information.
+
+### 3.10 Audit and Reporting Service
+
+**Primary responsibility:** Support audit records, operational reporting, and business analytics.
+
+Responsibilities:
+- Collect relevant business events and audit information.
+- Produce reports for orders, payments, inventory, and sales.
+- Support authorized operational and administrative reporting.
+- Maintain reporting projections for read-intensive queries.
+- Provide traceability for important business operations.
+
+Data ownership:
+- Audit records collected under the system's audit policy.
+- Reporting projections and derived analytical data.
+- Report generation metadata.
+
+Out of scope:
+- Modifying authoritative business records owned by other services.
+- Replacing transactional databases as the source of truth.
+
+Reporting data may be eventually consistent with operational services. Access to reports must follow the system's authorization and data-retention requirements.
+
+## 4. Service Boundary Summary
+
+| Service | Core Business Capability | Authoritative Data |
+|---|---|---|
+| User and Authentication | Accounts and authentication | Customer account and authentication data |
+| Product Catalog | Product information | Product catalog and attributes |
+| Shopping Cart | Pre-checkout cart management | Active carts and cart items |
+| Order Management | Order lifecycle | Orders, order status, and order snapshots |
+| Payment | Payment transactions | Payment and refund records |
+| Inventory | Stock and reservations | Inventory quantities and reservations |
+| Promotion | Discounts and coupons | Promotion rules and redemption records |
+| Shipping | Shipment and delivery tracking | Shipment records and tracking status |
+| Notification | Message delivery | Notification and delivery records |
+| Audit and Reporting | Audit and analytics | Audit records and reporting projections |
+
+## 5. Communication Between Services
+
+Services will communicate through synchronous APIs when an immediate response is required and through events for asynchronous workflows, as defined in ADR-002.
+
+Examples include:
+
+| Producer | API or Event | Consumer | Purpose |
+|---|---|---|---|
+| Shopping Cart | Checkout request | Order Management | Submit a validated cart for order creation |
+| Order Management | `OrderCreated` | Inventory | Initiate inventory reservation |
+| Inventory | `InventoryReserved` | Order Management | Report successful stock reservation |
+| Inventory | `InventoryReservationFailed` | Order Management | Report reservation failure |
+| Payment | `PaymentAuthorized` | Order Management | Report payment authorization |
+| Payment | `PaymentFailed` | Order Management | Report payment failure |
+| Order Management | `OrderConfirmed` | Shipping | Initiate shipment preparation |
+| Shipping | `ShipmentDispatched` | Notification | Trigger a shipping notification |
+| Order Management | Order lifecycle events | Audit and Reporting | Update audit and reporting projections |
+
+These events are illustrative. Their exact payloads, versioning, delivery guarantees, and workflow ordering must follow ADR-002 and the detailed event contract definitions.
+
+Services must not assume that receiving an event automatically authorizes every downstream action. Each consumer must validate the event and its current business state before processing it.
+
+## 6. Data Ownership Principles
+
+The following principles apply to all services:
+
+1. **Single authoritative owner:** Each business entity has one service responsible for its authoritative state.
+2. **Database isolation:** A service must not directly read from or write to another service's private database.
+3. **Explicit interfaces:** Cross-service access must use documented APIs or events.
+4. **Local transactions:** Each service manages transactions within its own data store.
+5. **Eventual consistency:** Cross-service state changes may become visible at different times.
+6. **Data minimization:** Services should store only the information required for their responsibilities.
+7. **Schema independence:** Internal database schemas may evolve independently of other services.
+8. **Controlled data sharing:** Events and API responses must expose only approved information.
+
+Where another service needs information for local processing or reporting, it may maintain a local projection or snapshot, provided the source of that information is clearly identified.
+
+## 7. Consequences
+
+### 7.1 Positive Consequences
+
+- Clear responsibility boundaries reduce overlap in business logic.
+- Teams can develop and deploy services independently where dependencies permit.
+- Services can scale according to their individual workloads.
+- Database ownership improves data integrity and reduces cross-service coupling.
+- Domain events enable new consumers to be added with fewer changes to existing services.
+- Failures can be isolated more effectively when service contracts and retry policies are properly designed.
+
+### 7.2 Negative Consequences
+
+- Distributed workflows require coordination across multiple services.
+- Network communication introduces latency and failure scenarios.
+- Eventual consistency requires explicit handling of intermediate states.
+- Multiple services increase deployment, monitoring, testing, and operational effort.
+- Service boundaries may need revision as business requirements evolve.
+- Cross-service reporting may require replicated read models and reconciliation procedures.
+
+## 8. Alternatives Considered
+
+### 8.1 One Large E-commerce Service
+
+All business capabilities would be implemented in a single application and share a common data model.
+
+**Advantages:**
+- Simpler deployment and local development.
+- Easier transactions within a shared database.
+- Fewer network and messaging dependencies.
+
+**Disadvantages:**
+- Business capabilities are more tightly coupled.
+- Independent scaling and deployment are more difficult.
+- Shared data structures can make changes risky.
+
+**Conclusion:** Not selected as the target architecture because ADR-001 establishes a microservices approach.
+
+### 8.2 Split Services by Technical Layer
+
+Services would be organized around technical functions, such as database access, API handling, or generic processing, rather than business capabilities.
+
+**Advantages:**
+- May encourage reuse of certain technical components.
+- Can be straightforward in small applications.
+
+**Disadvantages:**
+- A single business operation may require many cross-service calls.
+- Business rules become distributed across technical boundaries.
+- Changes to a business capability may affect several services.
+
+**Conclusion:** Not selected. Service boundaries should primarily reflect business capabilities.
+
+### 8.3 Business-Oriented Microservices
+
+Each service owns a defined business capability and its authoritative data.
+
+**Advantages:**
+- Clearer ownership of business logic and data.
+- Better alignment with domain concepts.
+- Supports independent deployment and scaling where appropriate.
+
+**Disadvantages:**
+- Requires careful boundary design.
+- Introduces distributed-system complexity.
+- Requires explicit cross-service contracts and operational practices.
+
+**Conclusion:** Selected as the initial service decomposition.
+
+## 9. Risks and Mitigation
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Responsibilities overlap between services | Duplicated business rules and inconsistent data | Document ownership and review service contracts |
+| Services become too small or too numerous | Excessive operational complexity | Reassess boundaries using business cohesion and deployment needs |
+| Services share private databases | Tight coupling and unsafe schema changes | Enforce service-owned data stores and controlled interfaces |
+| Distributed workflow fails partway through | Orders, payments, or inventory may remain in intermediate states | Define workflow states, timeouts, retries, and compensating actions |
+| Reporting projections become stale | Reports may not reflect the latest transactions | Document consistency expectations and provide reconciliation mechanisms |
+| Service boundaries no longer match business needs | Frequent cross-service changes | Review the decomposition as requirements and domain knowledge evolve |
+
+## 10. Decision Outcome
+
+**Proposed:** Adopt the business-oriented service boundaries described in this ADR as the initial decomposition of the E-commerce System.
+
+Each service will own its defined business capability and authoritative data. Cross-service interactions will use documented APIs and domain events. The Order Management Service will coordinate the order lifecycle, while Payment, Inventory, Shipping, and other services will remain authoritative for their respective business domains.
+
+The boundaries may be revised following domain analysis, detailed workflow design, and implementation experience. Any significant change should be documented and reviewed for its impact on existing ADRs and service contracts.
+
+## 11. Follow-Up Actions
+
+- [ ] Validate the proposed boundaries against all E-commerce System SRS requirements.
+- [ ] Identify the authoritative owner for every business entity and critical business rule.
+- [ ] Define API contracts for synchronous interactions.
+- [ ] Define event contracts and ownership for domain events.
+- [ ] Document the order, payment, inventory, and shipping workflows.
+- [ ] Specify failure handling and compensation for distributed transactions.
+- [ ] Define service-level security and access-control policies.
+- [ ] Determine database and deployment requirements for each service.
+- [ ] Create service dependency and context diagrams.
+- [ ] Review service boundaries after the first end-to-end workflow prototype.

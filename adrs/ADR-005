@@ -1,0 +1,432 @@
+# ADR-005: Coordinate Order, Payment, and Inventory States
+
+## Status
+**Proposed**
+
+## Date
+2026-10-15
+
+## Decision Makers
+Software Architecture Team
+
+## Related Documents
+- Software Requirements Specification (SRS): E-commerce System
+- ADR-001: Use Microservices Architecture
+- ADR-002: Adopt Event-Driven Communication
+- ADR-003: Define Business Service Boundaries
+- ADR-004: Integrate External Payment Service
+
+## 1. Context
+
+The E-commerce System uses a microservices architecture in which Order Management, Payment, and Inventory are independent services with separate data ownership.
+
+These services participate in a shared business workflow when a customer places an order:
+
+- The Order Management Service creates and manages the order.
+- The Payment Service initiates and tracks payment operations.
+- The Inventory Service checks stock availability and manages inventory reservations.
+
+Because each service owns its own data and local transactions, the system cannot rely on a single database transaction to update order, payment, and inventory states atomically.
+
+Failures may occur at any stage. For example, inventory may be reserved successfully while payment fails, a payment request may time out even though the provider processed it, or an event may be delivered more than once.
+
+The system therefore requires an explicit coordination strategy that preserves business consistency, prevents duplicate operations, and supports recovery from partial failures.
+
+## 2. Decision
+
+We will coordinate order, payment, and inventory workflows using a **Saga Pattern** with event-driven communication, as established by ADR-002.
+
+The Order Management Service will act as the business workflow coordinator for the order lifecycle. The Payment Service and Inventory Service will remain authoritative owners of their respective payment and inventory states.
+
+Each service will execute local transactions and publish events describing relevant state changes. The Order Management Service will use these events to determine the next workflow step.
+
+If a workflow cannot complete, the system will execute appropriate compensating actions, such as releasing a stock reservation or requesting a payment void or refund.
+
+The workflow must not assume that all distributed operations succeed or fail atomically.
+
+### 2.1 Core Principles
+
+1. **Single ownership:** Each service owns and updates its own authoritative state.
+2. **Explicit workflow states:** Order, payment, and inventory states must be modeled separately.
+3. **Event-driven coordination:** Services communicate asynchronous state changes through documented domain events.
+4. **Idempotent processing:** Repeated commands or events must not cause unintended duplicate operations.
+5. **Eventual consistency:** Temporary differences between service states are permitted while a workflow is progressing.
+6. **Compensating actions:** Failed workflows must have defined recovery behavior.
+7. **Verified payment outcomes:** An ambiguous payment result must be reconciled before an unsafe retry or final order decision.
+8. **Auditable transitions:** Important state changes and compensation attempts must be traceable.
+
+## 3. Responsibilities
+
+### 3.1 Order Management Service
+
+The Order Management Service is responsible for:
+
+- Creating orders.
+- Maintaining authoritative order status.
+- Coordinating payment and inventory operations.
+- Tracking workflow progress and outstanding actions.
+- Deciding whether an order can be confirmed or must be cancelled.
+- Initiating compensating actions when required.
+- Publishing order lifecycle events.
+
+It must not directly modify payment records or inventory records owned by other services.
+
+### 3.2 Payment Service
+
+The Payment Service is responsible for:
+
+- Creating and maintaining payment records.
+- Initiating payment operations with the external provider.
+- Tracking authorization, capture, failure, void, and refund outcomes where supported.
+- Validating provider notifications.
+- Publishing payment outcome events.
+- Supporting payment reconciliation.
+
+The Payment Service must not independently change the authoritative order status.
+
+### 3.3 Inventory Service
+
+The Inventory Service is responsible for:
+
+- Maintaining available and reserved stock quantities.
+- Validating stock availability.
+- Creating inventory reservations.
+- Preventing overselling through concurrency-safe operations.
+- Releasing reservations when permitted.
+- Finalizing stock deductions according to the inventory and fulfillment policy.
+- Publishing inventory reservation and release events.
+
+The Inventory Service must not independently change the authoritative order status.
+
+## 4. Order Workflow
+
+The proposed workflow uses inventory reservation and payment processing as separate steps coordinated by the Order Management Service.
+
+### 4.1 Successful Order Flow
+
+1. The customer submits a checkout request.
+2. The Order Management Service creates an order with status `PENDING`.
+3. The Order Management Service publishes `OrderCreated`.
+4. The Inventory Service receives the event or an equivalent reservation command and attempts to reserve stock.
+5. The Inventory Service records the reservation and publishes `InventoryReserved` if successful.
+6. If inventory cannot be reserved, the Inventory Service publishes `InventoryReservationFailed`.
+7. After a successful reservation, the Order Management Service requests payment processing.
+8. The Payment Service initiates the payment and tracks the provider's result.
+9. The Payment Service publishes the appropriate payment outcome event.
+10. The Order Management Service evaluates the payment result and inventory state.
+11. If all required conditions are satisfied, the Order Management Service confirms the order and publishes `OrderConfirmed`.
+12. The Inventory Service processes subsequent inventory actions according to the stock-commit policy.
+13. The Notification Service may notify the customer of the order outcome.
+
+The system must define whether payment authorization or successful capture is required before an order can be confirmed. This depends on the selected provider and business policy.
+
+### 4.2 Inventory Reservation Failure
+
+If inventory reservation fails:
+
+1. The Inventory Service publishes `InventoryReservationFailed`.
+2. The Order Management Service marks the order as unable to proceed.
+3. The order is cancelled or moved to an appropriate failure state.
+4. The customer is informed that the order could not be completed.
+5. No payment should be initiated if the workflow has not yet reached the payment stage.
+
+If payment has already been initiated because of a concurrent or delayed workflow step, the Order Management Service must reconcile the payment state and request the appropriate cancellation, void, or refund operation where applicable.
+
+### 4.3 Payment Failure
+
+If payment fails after inventory has been reserved:
+
+1. The Payment Service publishes `PaymentFailed`.
+2. The Order Management Service records the payment outcome.
+3. The Order Management Service requests the Inventory Service to release the reservation.
+4. The Inventory Service releases the reservation if it remains eligible for release.
+5. The Inventory Service publishes `InventoryReservationReleased`.
+6. The Order Management Service completes the cancellation workflow once the required conditions are satisfied.
+
+If payment failure is uncertain rather than confirmed, the workflow must remain in a pending or reconciliation state until the result can be verified.
+
+### 4.4 Payment Timeout or Unknown Outcome
+
+A timeout does not necessarily mean that the provider rejected the payment.
+
+If a payment request times out:
+
+1. The Payment Service records the operation as unresolved or pending verification.
+2. The Payment Service queries the provider or waits for a trusted provider notification.
+3. The system avoids issuing a new charge with a different idempotency key while the original result remains ambiguous.
+4. The Order Management Service keeps the order in a non-final state.
+5. Once the payment result is verified, the workflow continues or performs compensation.
+
+Inventory reservation expiry must be coordinated with this process. A reservation must not be released in a way that contradicts a confirmed or still-resolvable payment without an explicit recovery policy.
+
+## 5. State Models
+
+### 5.1 Order States
+
+The following states are proposed for the Order Management Service:
+
+| State | Description |
+|---|---|
+| `PENDING` | Order has been created and is awaiting workflow processing. |
+| `AWAITING_PAYMENT` | Inventory requirements have been satisfied and payment is being processed. |
+| `PAYMENT_PENDING` | Payment outcome is not yet known. |
+| `CONFIRMED` | Required inventory and payment conditions have been satisfied. |
+| `CANCELLATION_PENDING` | Cancellation has started, but required compensating actions remain unresolved. |
+| `CANCELLED` | The order has been cancelled and required cancellation conditions have been met. |
+| `FULFILLMENT_PENDING` | The confirmed order is awaiting fulfillment processing. |
+| `COMPLETED` | The order has reached the defined business completion point. |
+| `COMPENSATION_REQUIRED` | An inconsistency or failed compensation requires additional recovery work. |
+
+The implementation may introduce additional states if required by the business workflow. All state transitions must be explicitly validated.
+
+### 5.2 Payment States
+
+The Payment Service will own payment state as defined in ADR-004. Relevant states may include:
+
+- `CREATED`
+- `PENDING`
+- `AUTHORIZED`
+- `SUCCEEDED`
+- `FAILED`
+- `CANCELLED`
+- `VOIDED`
+- `PARTIALLY_REFUNDED`
+- `REFUNDED`
+
+The system must distinguish authorization from capture or completed payment when the provider supports those separate operations.
+
+### 5.3 Inventory States
+
+The Inventory Service should track inventory reservation state independently of order state.
+
+| State | Description |
+|---|---|
+| `AVAILABLE` | Stock is available for reservation. |
+| `RESERVED` | Stock has been reserved for a specific order. |
+| `COMMITTED` | The reservation has been finalized according to the inventory policy. |
+| `RELEASED` | The reservation has been released and stock made available again. |
+| `EXPIRED` | The reservation has expired according to an approved policy. |
+
+These states describe reservation lifecycle behavior. The actual stock quantity model may use separate available, reserved, and committed quantities rather than storing all inventory in a single state.
+
+## 6. Saga Coordination
+
+The Order Management Service will coordinate the order saga by recording workflow progress and issuing the next command only when the relevant business conditions are satisfied.
+
+A simplified sequence is:
+
+| Step | Trigger | Action | Expected Result |
+|---|---|---|---|
+| 1 | Checkout submitted | Create order | `PENDING` |
+| 2 | Order created | Request inventory reservation | Reservation processing starts |
+| 3 | Inventory reserved | Request payment | Payment processing starts |
+| 4 | Payment outcome verified | Evaluate workflow | Confirm or compensate |
+| 5 | Required conditions met | Confirm order | `CONFIRMED` |
+| 6 | Required step fails | Start compensation | `CANCELLATION_PENDING` |
+| 7 | Compensation completed | Finalize cancellation | `CANCELLED` |
+
+The workflow coordinator must persist its progress so that processing can resume after service restarts.
+
+Commands should have unique identifiers and include the order ID, relevant operation ID, and correlation ID.
+
+## 7. Compensation Rules
+
+Compensation is a business operation, not a rollback of a distributed database transaction. It may fail or require additional processing.
+
+| Failure Scenario | Required Action |
+|---|---|
+| Inventory reservation fails before payment begins | Stop the workflow and cancel or reject the order. |
+| Payment fails after reservation | Request release of the inventory reservation. |
+| Payment succeeds but order confirmation cannot complete | Retry confirmation safely or initiate an approved payment compensation workflow. |
+| Order is cancelled after authorization | Request payment void where supported. |
+| Order is cancelled after capture | Request a refund where permitted by the business policy. |
+| Inventory release fails | Retry and alert operations if the failure persists. |
+| Refund result is unknown | Reconcile with the provider before submitting another refund. |
+| Duplicate event is received | Detect the duplicate and avoid repeating the business operation. |
+
+Compensation must be idempotent. Each compensation request should be tracked independently, and the system must retain the original payment and inventory history.
+
+An order must not be marked fully cancelled merely because cancellation was requested if required financial or inventory compensation remains unresolved. Such cases should remain in an appropriate pending or recovery state.
+
+## 8. Event-Driven Communication
+
+Following ADR-002, the services will communicate relevant state changes through domain events.
+
+Proposed events include:
+
+- `OrderCreated`
+- `InventoryReservationRequested`
+- `InventoryReserved`
+- `InventoryReservationFailed`
+- `PaymentInitiated`
+- `PaymentAuthorized`
+- `PaymentSucceeded`
+- `PaymentFailed`
+- `InventoryReleaseRequested`
+- `InventoryReservationReleased`
+- `OrderConfirmed`
+- `OrderCancellationRequested`
+- `OrderCancelled`
+- `RefundInitiated`
+- `RefundCompleted`
+- `CompensationFailed`
+
+The event catalog must define each event's producer, consumer, payload, version, and meaning. Events that represent requests for action should be distinguished from events that confirm a completed state change.
+
+For example, `InventoryReleaseRequested` means a release has been requested; it does not prove that inventory has been released. `InventoryReservationReleased` confirms the resulting state change.
+
+Services must process events idempotently and validate that the requested operation is compatible with the current business state.
+
+## 9. Reliability and Consistency
+
+### 9.1 Transactional Outbox
+
+Services should use the Transactional Outbox Pattern for critical state changes that must be published reliably.
+
+The business update and outgoing event record are stored in the same local database transaction. A separate publisher sends the event to the message broker.
+
+This reduces the risk that a state change is committed while its corresponding event is lost.
+
+### 9.2 Idempotency and Deduplication
+
+- Every command and event should have a unique identifier.
+- Consumers should record processed event IDs where appropriate.
+- Payment operations should use provider-supported idempotency mechanisms.
+- Inventory reservation and release operations should be idempotent for a given reservation ID.
+- Order state transitions must reject duplicate or invalid updates.
+
+### 9.3 Timeouts and Retries
+
+Each workflow step must have defined timeout and retry behavior.
+
+Retries should be limited to transient failures and must not repeat irreversible business operations without checking the existing result.
+
+If an operation cannot be resolved automatically, it should move to a recoverable exception state and trigger operational monitoring.
+
+### 9.4 Eventual Consistency
+
+Order, payment, and inventory states may temporarily differ while the saga is running.
+
+The customer interface should distinguish between processing, confirmed, and failed outcomes. It must not display an order as fully confirmed until the required business conditions have been verified.
+
+### 9.5 Reservation Expiry
+
+Inventory reservations may have an expiry policy to prevent stock from being held indefinitely.
+
+The expiry policy must account for payment processing latency and unresolved payment outcomes. Before releasing a reservation associated with an uncertain payment, the system must apply the defined reconciliation and compensation rules.
+
+## 10. Observability and Auditability
+
+The system must support:
+
+- A shared correlation ID for the complete order workflow.
+- Unique IDs for orders, payment operations, inventory reservations, and compensation actions.
+- Structured logs for each state transition.
+- Metrics for pending orders, payment failures, reservation failures, and compensation failures.
+- Alerts for workflows exceeding their expected processing time.
+- Operational tools or procedures to inspect and recover stuck workflows.
+- Audit records for important order, payment, and inventory state changes.
+
+Sensitive payment information must not be written to general application logs or event payloads.
+
+## 11. Alternatives Considered
+
+### 11.1 Distributed Two-Phase Commit
+
+**Description:** Coordinate order, payment, and inventory changes through a distributed atomic transaction.
+
+**Advantages:**
+- Offers a transactional model where all participants support the protocol.
+
+**Disadvantages:**
+- External payment providers generally do not participate in the application's database transaction.
+- Distributed locking and transaction coordination can reduce availability.
+- Recovery and operational complexity increase.
+
+**Conclusion:** Not selected for the cross-service business workflow.
+
+### 11.2 Independent Service Updates Without a Coordinator
+
+**Description:** Each service updates its own state independently without a defined workflow coordinator.
+
+**Advantages:**
+- Minimal orchestration logic.
+- Each service can operate with fewer explicit dependencies.
+
+**Disadvantages:**
+- No clear owner for workflow progression.
+- Partial failures may leave orders, payments, and inventory inconsistent.
+- Compensation and recovery behavior becomes difficult to coordinate.
+
+**Conclusion:** Rejected because the system requires explicit workflow ownership and recovery rules.
+
+### 11.3 Saga Pattern
+
+**Description:** Coordinate local transactions across services and use compensating actions when a workflow cannot complete.
+
+**Advantages:**
+- Fits independently owned service databases.
+- Supports asynchronous workflows.
+- Provides explicit recovery behavior.
+- Works with external payment integrations.
+
+**Disadvantages:**
+- Requires explicit state machines and compensation logic.
+- Intermediate states are visible.
+- Recovery and monitoring need additional implementation effort.
+
+**Conclusion:** Selected.
+
+## 12. Consequences
+
+### 12.1 Positive Consequences
+
+- Clear ownership of order, payment, and inventory state.
+- Reduced dependence on distributed atomic transactions.
+- Explicit handling of partial failures.
+- Improved traceability of business workflows.
+- Better resilience when services or external providers experience temporary failures.
+- Consistent rules for retries, compensation, and recovery.
+
+### 12.2 Negative Consequences
+
+- The workflow coordinator introduces additional logic and persistent state.
+- The system must handle eventual consistency.
+- Compensation actions may take time and may themselves fail.
+- Testing requires simulations of timeouts, duplicate events, and partial failures.
+- Operational teams need procedures for unresolved or stuck workflows.
+
+## 13. Requirements Traceability
+
+| SRS Area | Relationship to This Decision |
+|---|---|
+| Checkout and Order Creation | Defines coordinated order submission and processing. |
+| Order Management | Establishes authoritative order state and workflow progression. |
+| Payment Processing | Coordinates verified payment outcomes with order state. |
+| Inventory Management | Coordinates stock reservations, release, and commitment. |
+| Reliability Requirements | Defines retries, recovery, and failure handling. |
+| Event-Driven Communication | Uses domain events for asynchronous coordination. |
+| Audit and Reporting | Supports traceability of state transitions and compensation. |
+
+## 14. Decision Outcome
+
+**Proposed:** Use a Saga Pattern coordinated by the Order Management Service to manage order, payment, and inventory workflows.
+
+Each service will maintain its own authoritative state and perform local transactions. Domain events will communicate completed state changes, while explicit commands will request operations. Failed workflows will use idempotent compensating actions and persistent recovery tracking.
+
+The detailed order state machine, payment capture policy, inventory commitment timing, reservation expiry, and compensation rules must be finalized before production implementation.
+
+## 15. Follow-Up Actions
+
+- [ ] Define the complete order state machine and permitted transitions.
+- [ ] Confirm when payment authorization and capture occur.
+- [ ] Define inventory reservation, commitment, and expiry policies.
+- [ ] Document the saga workflow and all compensation paths.
+- [ ] Define command and event schemas with unique operation identifiers.
+- [ ] Implement persistent workflow progress tracking.
+- [ ] Apply idempotency to payment and inventory operations.
+- [ ] Implement reliable event publishing and consumption.
+- [ ] Define timeout, retry, reconciliation, and escalation policies.
+- [ ] Add monitoring for stuck workflows and failed compensation.
+- [ ] Test duplicate events, out-of-order events, service outages, and ambiguous payment results.
+- [ ] Document operational procedures for manual recovery.

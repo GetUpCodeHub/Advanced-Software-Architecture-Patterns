@@ -1,0 +1,213 @@
+# ADR-001: Use Microservices Architecture
+
+## Status
+**Proposed**
+
+## Date
+2026-10-15
+
+## Decision Makers
+Software Architecture Team
+
+## Related Documents
+- Software Requirements Specification (SRS): E-commerce System
+
+## 1. Context
+
+The E-commerce System is an online shopping platform that allows customers to browse products, manage shopping carts, place orders, make payments, and track deliveries. Administrators are responsible for managing products, categories, inventory, orders, promotions, and customer accounts.
+
+The system consists of several business capabilities, including:
+
+- User registration and authentication
+- Product catalog management
+- Shopping cart management
+- Order processing
+- Payment processing
+- Inventory management
+- Promotion and discount management
+- Shipping and order tracking
+- Customer notifications
+- Audit logging and reporting
+
+These capabilities have different responsibilities and may have different scalability, availability, and maintenance requirements.
+
+A traditional monolithic architecture could initially simplify development, but as the system grows, changes to one business component may affect other components. Scaling the entire application to accommodate increased traffic in only one area may also lead to inefficient resource utilization.
+
+Therefore, the system needs an architecture that supports modularity, maintainability, scalability, and independent evolution of business capabilities.
+
+## 2. Decision
+
+We propose adopting a **Microservices Architecture** for the E-commerce System.
+
+The system will be organized into separate services based on business capabilities. Each service will have a clearly defined responsibility and communicate with other services through well-defined APIs or asynchronous events.
+
+The proposed logical services are:
+
+| Service | Responsibility |
+|---|---|
+| User Service | User registration, authentication integration, and profile management |
+| Product Catalog Service | Product information, categories, descriptions, and product publication |
+| Shopping Cart Service | Shopping cart items and quantity management |
+| Order Service | Order creation, order details, and order lifecycle management |
+| Payment Service | Payment provider integration and payment status management |
+| Inventory Service | Stock availability, inventory updates, and stock reservation where required |
+| Promotion Service | Promotion rules and discount calculations |
+| Shipping Service | Shipment information and delivery tracking |
+| Notification Service | Order confirmations and relevant customer notifications |
+| Audit and Reporting Service | Audit records and operational reporting |
+
+These are proposed logical service boundaries. The final deployment boundaries will be determined during detailed architecture design. Not every logical service must necessarily be deployed independently from the beginning.
+
+Each service should encapsulate its business logic and own its data responsibilities. Services shall communicate through documented interfaces, and direct access to another service's internal data store should be avoided.
+
+Synchronous APIs may be used when an immediate response is required. Asynchronous messaging may be used for workflows such as notifications, order-status updates, and other background processing.
+
+## 3. Alternatives Considered
+
+### 3.1 Monolithic Architecture
+
+A monolithic architecture places most or all application functionality within a single deployable application.
+
+**Advantages:**
+
+- Simple initial development and deployment.
+- Easier local testing and debugging.
+- Lower initial infrastructure and operational complexity.
+- Straightforward communication between components within the application.
+
+**Disadvantages:**
+
+- Individual business capabilities cannot be deployed independently.
+- Scaling one component may require scaling the entire application.
+- The application may become harder to maintain as business logic grows.
+- Changes in one area may increase regression risks in other areas.
+
+**Reason for not selecting it as the preferred target architecture:** The SRS identifies independent business capabilities and scalability as important architectural concerns. A monolithic architecture may be less suitable if these requirements become substantial.
+
+### 3.2 Microservices Architecture
+
+A microservices architecture separates the application into independently deployable services organized around business capabilities.
+
+**Advantages:**
+
+- Services can be developed and maintained independently.
+- Individual services can be scaled according to demand.
+- Failures may be isolated when service boundaries and resilience mechanisms are designed appropriately.
+- Each service can evolve without requiring every other service to be redeployed.
+- Clear service responsibilities can improve maintainability.
+
+**Disadvantages:**
+
+- Distributed communication introduces network latency and failure scenarios.
+- Cross-service workflows and data consistency become more complex.
+- Deployment, monitoring, testing, and troubleshooting require additional infrastructure.
+- Infrastructure and operational costs may increase.
+
+**Reason for selecting it as the proposed architecture:** It aligns with the SRS direction of separating business capabilities and supporting scalability and maintainability.
+
+### 3.3 Modular Monolith
+
+A modular monolith keeps the application in one deployable unit while separating business capabilities into well-defined internal modules.
+
+**Advantages:**
+
+- Clear internal boundaries without requiring distributed communication.
+- Simpler deployment and operations than a fully distributed system.
+- Lower initial infrastructure complexity.
+
+**Disadvantages:**
+
+- Modules cannot be independently deployed.
+- Independent scaling of modules is limited.
+- Module boundaries may weaken if not enforced through development practices.
+
+**Reason for not selecting it as the preferred target architecture:** It provides a viable alternative if the project's scale or operational capacity does not justify independently deployed services. It may also serve as an initial implementation strategy if stakeholders approve a phased migration.
+
+## 4. Consequences
+
+### 4.1 Positive Consequences
+
+1. **Scalability:** Services experiencing higher traffic, such as Product Catalog or Order Service, can be scaled independently where the infrastructure permits.
+
+2. **Maintainability:** Business responsibilities are separated into services with clearer boundaries.
+
+3. **Independent Deployment:** Changes to one service can be released without necessarily redeploying the entire system.
+
+4. **Fault Isolation:** Appropriate service boundaries and resilience mechanisms can reduce the impact of certain service failures.
+
+5. **Technology Flexibility:** Different implementation technologies may be considered for individual services when justified by business and operational requirements.
+
+6. **Team Organization:** Development responsibilities can be allocated according to business capabilities.
+
+### 4.2 Negative Consequences
+
+1. **Operational Complexity:** The system requires service deployment, configuration, monitoring, and troubleshooting capabilities.
+
+2. **Distributed Data Management:** Transactions involving multiple services require explicit consistency and recovery strategies.
+
+3. **Network Dependencies:** Communication between services may fail or become slow.
+
+4. **Testing Complexity:** Integration and end-to-end testing must cover interactions between services.
+
+5. **Infrastructure Costs:** Multiple service instances, monitoring tools, and messaging infrastructure may increase operating costs.
+
+6. **Security Complexity:** Service-to-service communication and authorization must be secured in addition to customer-facing access.
+
+## 5. Implementation Considerations
+
+To implement the proposed architecture effectively, the project team should:
+
+- Define clear service boundaries and responsibilities.
+- Establish consistent API conventions and data contracts.
+- Define authentication and authorization for service-to-service communication.
+- Use asynchronous messaging for appropriate background workflows where needed.
+- Implement timeouts, retries, and idempotency where appropriate.
+- Establish centralized monitoring, structured logging, and audit capabilities.
+- Define how order, payment, and inventory states remain consistent across services.
+- Automate service deployment and testing where feasible.
+- Evaluate infrastructure cost and operational capacity before independently deploying every proposed service.
+
+The choice of programming language, database technology, message broker, container platform, and deployment environment remains open and shall be documented in separate decisions if required.
+
+## 6. Requirements Traceability
+
+This decision is based on the following requirements and architectural directions in the E-commerce System SRS:
+
+| SRS Reference | Requirement or Concern | Relationship to This ADR |
+|---|---|---|
+| Section 1.1 | The system should use Microservices Architecture to separate business capabilities. | Direct architectural motivation |
+| Section 2.1 | The system contains customer-facing interfaces, backend services, databases, storage, and external integrations. | Defines the overall system context |
+| Section 2.2 | The system supports catalog, cart, order, payment, inventory, notification, and administrative functions. | Identifies candidate service responsibilities |
+| Section 2.5 | The architecture should avoid unnecessary complexity and cost. | Requires careful selection of service boundaries |
+| Section 5.1 | The system should handle increased traffic and support horizontal scaling where practical. | Supports independent scaling where justified |
+| Section 5.4 | The implementation should separate major business responsibilities. | Supports maintainability and modularity |
+
+## 7. Risks and Mitigation
+
+| Risk | Mitigation |
+|---|---|
+| Too many small services increase complexity. | Group related responsibilities and deploy services independently only when justified. |
+| Network failures disrupt business workflows. | Use timeouts, bounded retries, appropriate fallbacks, and monitoring. |
+| Duplicate events cause repeated processing. | Use idempotent handlers and event identifiers. |
+| Order, payment, and inventory states become inconsistent. | Define explicit state transitions, reconciliation processes, and recovery workflows. |
+| Service deployment becomes difficult to manage. | Adopt automated deployment, configuration management, and health monitoring. |
+| Infrastructure costs exceed the project budget. | Monitor resource utilization and evaluate whether each independent service provides sufficient value. |
+
+## 8. Decision Outcome
+
+The project proposes Microservices Architecture as the target architecture for the E-commerce System because it supports the separation of business capabilities, maintainability, and potential independent scaling.
+
+The decision remains **Proposed** until reviewed and approved by the relevant project stakeholders.
+
+The final architecture shall avoid unnecessary service fragmentation and shall consider the project's actual traffic, team size, operational capabilities, and budget.
+
+## 9. Follow-up Actions
+
+- [ ] Review and approve the proposed architecture.
+- [ ] Create a C4 System Context Diagram.
+- [ ] Create a C4 Container Diagram showing the proposed services and external integrations.
+- [ ] Define service ownership and data boundaries.
+- [ ] Decide whether all proposed services require independent deployment.
+- [ ] Select API and asynchronous messaging conventions.
+- [ ] Define deployment, monitoring, security, and recovery strategies.
+- [ ] Review the architecture against the performance and cost requirements.
